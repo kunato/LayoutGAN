@@ -19,6 +19,8 @@ import torchvision.datasets
 from tensorboardX import SummaryWriter
 from torch.utils.checkpoint import checkpoint
 
+torch.multiprocessing.set_start_method('spawn', force="True")
+
 import models
 
 
@@ -29,28 +31,38 @@ class MnistLayoutDataset(torch.utils.data.Dataset):
         super(MnistLayoutDataset, self).__init__()
         self.train_data = torch.load(path + "/MNIST/processed/training.pt")[0]
         self.element_num = element_num
+
         # Guess: a threshold (阈值) to indicate this pixel is lighted (0-255).
         self.gt_thresh = gt_thresh
+        gt_values = []
+        for k in range(len(self.train_data)):
+            img = self.train_data[k]
+            gt_values_element = []
+            for id, i in enumerate(img):
+                for jd, j in enumerate(i):
+                    # If the current grayscale value is larger than the threshold, note this point.
+                    if j >= self.gt_thresh:
+                        # Create the layout element.
+                        # Meaning of `np.float32(2 * id +1) /56`?
+                        gt_values_element.append(
+                            torch.Tensor([
+                                1,
+                                np.float32(2 * id + 1) / 56,
+                                np.float32(2 * jd + 1) / 56
+                            ]))
+
+            gt_values.append(gt_values_element)
+        self.gt_values = gt_values
 
     def __getitem__(self, index):
         """Extract layout features from images."""
         img = self.train_data[index]  # Load an image.
-        gt_values = []
-
-        for id, i in enumerate(img):
-            for jd, j in enumerate(i):
-                # If the current grayscale value is larger than the threshold, note this point.
-                if j >= self.gt_thresh:
-                    # Create the layout element.
-                    # Meaning of `np.float32(2 * id +1) /56`?
-                    gt_values.append(torch.Tensor([1, np.float32(2 * id + 1) / 56, np.float32(2 * jd + 1) / 56]))
-
         graph_elements = []
 
         # Shuffle, insert the images in a random order.
         for _ in range(self.element_num):
-            ridx = random.randint(0, len(gt_values) - 1)
-            graph_elements.append(gt_values[ridx])
+            ridx = random.randint(0, len(self.gt_values[index]) - 1)
+            graph_elements.append(self.gt_values[index][ridx])
 
         # MNIST layout elements format [1, x, y]
         return torch.stack(graph_elements)
@@ -103,21 +115,30 @@ def train_mnist(device, writer):
     beta2 = 1.0
 
     # Download MNIST dataset
-    _ = torchvision.datasets.MNIST(
-        root=dataroot, train=True, download=True, transform=None)
+    _ = torchvision.datasets.MNIST(root=dataroot,
+                                   train=True,
+                                   download=True,
+                                   transform=None)
 
     # Load MNIST dataset with layout processed.
     train_mnist_layout = MnistLayoutDataset(dataroot)
     train_mnist_layout_loader = torch.utils.data.DataLoader(
-        train_mnist_layout, batch_size=batch_size, num_workers=dataloader_workers)
+        train_mnist_layout,
+        batch_size=batch_size,
+        num_workers=dataloader_workers,
+        pin_memory=True)
 
     # Initialize the generator and discriminator.
     # element_num: 128 random points for each MNIST image.
-    generator = models.Generator(
-        n_gpu, class_num=cls_num, element_num=128, feature_size=3).to(device)
+    generator = models.Generator(n_gpu,
+                                 class_num=cls_num,
+                                 element_num=128,
+                                 feature_size=3).to(device)
     # element_num: 128 random points for each MNIST image.
-    discriminator = models.RelationDiscriminator(
-        n_gpu, class_num=cls_num, element_num=128, feature_size=3).to(device)
+    discriminator = models.RelationDiscriminator(n_gpu,
+                                                 class_num=cls_num,
+                                                 element_num=128,
+                                                 feature_size=3).to(device)
     print(generator)  # Check information of the generator.
     print(discriminator)  # Check information of the discriminator.
 
@@ -128,7 +149,8 @@ def train_mnist(device, writer):
     # Initialize optimizers for models.
     print('Initialize optimizers.')
     generator_optimizer = optim.Adam(generator.parameters(), learning_rate)
-    discriminator_optimizer = optim.Adam(discriminator.parameters(), learning_rate)
+    discriminator_optimizer = optim.Adam(discriminator.parameters(),
+                                         learning_rate)
 
     # Initialize training parameters.
     print('Initialize training.')
@@ -151,7 +173,8 @@ def train_mnist(device, writer):
             discriminator_real = discriminator(real_images)
             discriminator_real_loss = real_loss(discriminator_real, False)
             # TensorboardX
-            writer.add_scalar('Discriminator Real Loss', discriminator_real_loss, epoch + batch_i)
+            writer.add_scalar('Discriminator Real Loss',
+                              discriminator_real_loss, epoch + batch_i)
             print('Finish train discriminator with real images.')
 
             # Size of the zlist does not equal to element number.
@@ -173,10 +196,12 @@ def train_mnist(device, writer):
             print('Calculating discriminator loss.')
             discriminator_fake_loss = fake_loss(discriminator_fake)
             # TensorboardX
-            writer.add_scalar('Discriminator Fake Loss', discriminator_fake_loss, epoch + batch_i)
+            writer.add_scalar('Discriminator Fake Loss',
+                              discriminator_fake_loss, epoch + batch_i)
             discriminator_loss = discriminator_real_loss + discriminator_fake_loss
             # TensorboardX
-            writer.add_scalar('Discriminator Total Loss', discriminator_loss, epoch + batch_i)
+            writer.add_scalar('Discriminator Total Loss', discriminator_loss,
+                              epoch + batch_i)
             print('Discriminator back propagation.')
             discriminator_loss.backward()
             discriminator_optimizer.step()
@@ -225,8 +250,10 @@ def train_mnist(device, writer):
             # TensorBoardX
             writer.add_figure('Generated Points', figures, epoch + batch_i)
 
-            print('Epoch [{:5d}/{:5d}] | discriminator_loss: {:6.4f} | generator_loss: {:6.4f}'.
-                  format(epoch + 1, num_epochs, discriminator_loss.item(), generator_loss.item()))
+            print(
+                'Epoch [{:5d}/{:5d}] | discriminator_loss: {:6.4f} | generator_loss: {:6.4f}'
+                .format(epoch + 1, num_epochs, discriminator_loss.item(),
+                        generator_loss.item()))
 
 
 if __name__ == '__main__':
